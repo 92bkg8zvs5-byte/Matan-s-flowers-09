@@ -105,7 +105,7 @@ function vCust(b) {
 const ymd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 function nextDelivery() {
   const d = new Date(); d.setHours(9, 0, 0, 0);
-  do { d.setDate(d.getDate() + 1); } while (d.getDay() !== 4);
+  do { d.setDate(d.getDate() + 1); } while (d.getDay() !== 5);
   if (d - new Date() < 172800000) d.setDate(d.getDate() + 7);
   return ymd(d);
 }
@@ -159,117 +159,4 @@ async function api(req, res, p) {
   if (p === '/api/me' && m === 'PUT') {
     const c = needCust(req), v = vCust(await body(req)); if (v.bad) throw new HttpError(400, 'פרטים חסרים', v.e);
     if (db.customers.some(x => x.id !== c.id && x.phone === v.o.phone)) throw new HttpError(409, 'הטלפון כבר רשום', { phone: 'הטלפון כבר רשום בחשבון אחר' });
-    Object.assign(c, v.o); save(); return send(res, 200, { customer: pubCust(c), order: pubOrder(c) });
-  }
-  if (p === '/api/order' && m === 'POST') {
-    const c = needCust(req), b = await body(req), a = active(c);
-    if (a && a.status !== 'ordered') throw new HttpError(409, 'ההזמנה כבר שולמה ולא ניתן לשנותה');
-    const flower = FLOWERS.includes(b.flower) ? b.flower : null, addr = clean(b.addr, 150);
-    if (!flower) throw new HttpError(400, 'נא לבחור פרחים'); if (addr.length < 5) throw new HttpError(400, 'נא להזין כתובת למשלוח');
-    const o = a || { id: uid(), cid: c.id, date: nextDelivery(), ref: newRef(), created: Date.now() };
-    Object.assign(o, { flower, addr, status: 'ordered', updated: Date.now() }); if (!a) db.orders.push(o); save();
-    return send(res, 200, { order: pubOrder(c) });
-  }
-  if (p === '/api/order/paid' && m === 'POST') {
-    const c = needCust(req), o = active(c);
-    if (!o || o.status !== 'ordered') throw new HttpError(409, 'אין הזמנה שממתינה לתשלום');
-    o.status = 'pending'; o.updated = Date.now(); save();
-    notifyAdmin(`${o.ref}: ${c.name} (${c.phone}) מדווח/ת ששילם/ה ₪${PRICE} בביט. ${o.flower}, ${o.date}. נא לאשר באפליקציית הניהול.`);
-    return send(res, 200, { order: pubOrder(c) });
-  }
-  if (p === '/api/order/received' && m === 'POST') {
-    const c = needCust(req), o = active(c);
-    if (!o || o.status !== 'paid') throw new HttpError(409, 'אפשר לאשר קבלה רק אחרי שההזמנה שולמה');
-    o.status = 'delivered'; o.updated = Date.now(); save();
-    notifyAdmin(`${o.ref}: ${c.name} אישר/ה שקיבל/ה את הזר.`);
-    return send(res, 200, { order: pubOrder(c) });
-  }
-  if (p === '/api/order/cancel' && m === 'POST') {
-    const c = needCust(req), o = active(c);
-    if (!o) throw new HttpError(409, 'אין הזמנה לביטול');
-    if (daysUntil(o.date) < 3) throw new HttpError(409, 'אי אפשר לבטל פחות משלושה ימים לפני המשלוח');
-    const was = o.status; o.status = 'cancelled'; o.updated = Date.now(); if (was !== 'ordered') o.refund = 'due'; save();
-    notifyAdmin(`${o.ref}: ${c.name} (${c.phone}) ביטל/ה הזמנה.` + (o.refund === 'due' ? ` יש להחזיר ₪${PRICE} בביט.` : ''));
-    return send(res, 200, { order: pubOrder(c) });
-  }
-  if (p === '/api/history' && m === 'GET') {
-    const c = needCust(req), list = db.orders.filter(o => o.cid === c.id).sort((a, b) => a.date < b.date ? 1 : -1).map(o => ({ date: o.date, flower: o.flower, status: eff(o), refund: o.refund || null }));
-    const paid = list.filter(o => o.status === 'paid' || o.status === 'delivered').length;
-    return send(res, 200, { list, stats: { count: list.length, received: list.filter(o => o.status === 'delivered').length, spent: paid * PRICE } });
-  }
-  /* --- מנהל --- */
-  if (p === '/api/admin/login' && m === 'POST') {
-    if (limited(req, 'adm', 8)) throw new HttpError(429, 'יותר מדי ניסיונות, נסו שוב בעוד כמה דקות');
-    const b = await body(req);
-    if (String(b.user) !== db.admin.user || !checkPw(b.password, db.admin)) throw new HttpError(401, 'שם משתמש או סיסמה שגויים');
-    setCookie(req, res, 'fa', sign({ s: db.admin.salt, exp: Date.now() + 12 * 36e5 }), 12 * 3600); return send(res, 200, { user: db.admin.user });
-  }
-  if (p === '/api/admin/logout' && m === 'POST') { setCookie(req, res, 'fa', '', 0); return send(res, 200, {}); }
-  if (p === '/api/admin/me' && m === 'GET') { needAdmin(req); return send(res, 200, { user: db.admin.user }); }
-  if (p === '/api/admin/orders' && m === 'GET') { needAdmin(req); return send(res, 200, { orders: db.orders.map(adminRow).sort((a, b) => a.date < b.date ? 1 : -1) }); }
-  if (p === '/api/admin/password' && m === 'POST') {
-    needAdmin(req); const b = await body(req);
-    if (!checkPw(b.current, db.admin)) throw new HttpError(400, 'הסיסמה הנוכחית שגויה');
-    const user = clean(b.user, 40) || db.admin.user, pw = String(b.password || '');
-    if (pw && pw.length < 8) throw new HttpError(400, 'הסיסמה החדשה חייבת להכיל לפחות 8 תווים');
-    db.admin = Object.assign({ user }, pw ? hashPw(pw) : { salt: db.admin.salt, hash: db.admin.hash }); flush();
-    setCookie(req, res, 'fa', sign({ s: db.admin.salt, exp: Date.now() + 12 * 36e5 }), 12 * 3600); return send(res, 200, { user });
-  }
-  let mm = p.match(/^\/api\/admin\/orders(?:\/([a-f0-9]+))?$/);
-  if (mm && (m === 'POST' || m === 'PUT' || m === 'DELETE')) {
-    needAdmin(req);
-    if (m === 'DELETE') { const i = db.orders.findIndex(o => o.id === mm[1]); if (i < 0) throw new HttpError(404, 'לא נמצא'); db.orders.splice(i, 1); save(); return send(res, 200, {}); }
-    const b = await body(req), e = {}, name = clean(b.name, 60), phone = norm(b.phone), email = clean(b.email, 120).toLowerCase(), addr = clean(b.addr, 150);
-    if (name.length < 2) e.name = 'שם'; if (!okPhone(phone)) e.phone = 'טלפון'; if (email && !okMail(email)) e.email = 'מייל'; if (addr.length < 5) e.addr = 'כתובת';
-    if (!FLOWERS.includes(b.flower)) e.flower = 'פרחים'; if (!STATUSES.includes(b.status)) e.status = 'סטטוס'; if (!/^\d{4}-\d{2}-\d{2}$/.test(b.date || '')) e.date = 'תאריך';
-    if (Object.keys(e).length) throw new HttpError(400, 'שדות לא תקינים: ' + Object.values(e).join(', '), e);
-    let o;
-    if (m === 'PUT') { o = db.orders.find(x => x.id === mm[1]); if (!o) throw new HttpError(404, 'לא נמצא'); }
-    let c = o && db.customers.find(x => x.id === o.cid);
-    if (!c) c = db.customers.find(x => x.phone === phone);
-    if (!c) { c = { id: uid(), created: Date.now(), addr }; db.customers.push(c); }
-    Object.assign(c, { name, phone, email }); if (!c.addr) c.addr = addr;
-    const was = o && o.status;
-    if (!o) { o = { id: uid(), created: Date.now(), ref: newRef() }; db.orders.push(o); }
-    Object.assign(o, { cid: c.id, date: b.date, flower: b.flower, addr, status: b.status, updated: Date.now() });
-    if (b.status === 'cancelled' && (was === 'paid' || was === 'pending') && !o.refund) o.refund = 'due';
-    if (b.refund === 'done' || b.refund === 'due') o.refund = b.refund;
-    save();
-    if (b.status === 'paid' && was !== 'paid') sendMail(c.email, 'התשלום אושר – flowers', mailWrap('התשלום התקבל', `הזמנה ${esc(o.ref)} אושרה. הזר (${esc(o.flower)}) יגיע אליכם בתאריך ${esc(o.date)}. תודה!`));
-    return send(res, 200, { order: adminRow(o) });
-  }
-  throw new HttpError(404, 'לא נמצא');
-}
-
-/* ---------- קבצים סטטיים ---------- */
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json', '.json': 'application/json' };
-const SEC = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" };
-function reminderIcs(req, res) {
-  const q = new URL(req.url, 'http://x').searchParams, day = Math.min(6, Math.max(0, parseInt(q.get('day'), 10) || 0)), tm = /^\d{2}:\d{2}$/.test(q.get('time') || '') ? q.get('time') : '18:00';
-  const [h, mi] = tm.split(':').map(Number), d = new Date(); d.setHours(h, mi, 0, 0);
-  while (d.getDay() !== day || d < new Date()) d.setDate(d.getDate() + 1);
-  const z = n => String(n).padStart(2, '0'), L = x => x.getFullYear() + z(x.getMonth() + 1) + z(x.getDate()) + 'T' + z(x.getHours()) + z(x.getMinutes()) + '00', e = new Date(d.getTime() + 900000);
-  const ics = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//flowers//HE', 'BEGIN:VEVENT', 'UID:flowers-' + day + tm.replace(':', '') + '@flowers', 'DTSTAMP:' + new Date().toISOString().replace(/[-:]|\.\d+/g, ''), 'DTSTART:' + L(d), 'DTEND:' + L(e), 'RRULE:FREQ=WEEKLY;BYDAY=' + ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'][day], 'SUMMARY:בחירת פרחים לשבוע – flowers', 'DESCRIPTION:להיכנס לאפליקציה ולבחור את הפרחים והכתובת למשלוח הקרוב.', 'BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:flowers', 'TRIGGER:PT0S', 'END:VALARM', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n');
-  res.writeHead(200, { 'Content-Type': 'text/calendar; charset=utf-8', 'Content-Disposition': 'inline; filename="flowers-reminder.ics"', 'Cache-Control': 'no-store' });
-  res.end(ics);
-}
-function serve(req, res, p) {
-  if (p === '/reminder.ics') return reminderIcs(req, res);
-  if (p === '/') p = '/index.html'; if (p === '/admin') p = '/admin.html';
-  const f = path.normalize(path.join(PUB, p));
-  if (!f.startsWith(PUB + path.sep)) { res.writeHead(403); return res.end(); }
-  if (FLAT && (path.dirname(f) !== __dirname || !FLAT_OK.test(path.basename(f)))) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('לא נמצא'); }
-  fs.readFile(f, (err, buf) => {
-    if (err) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('לא נמצא'); }
-    res.writeHead(200, Object.assign({ 'Content-Type': MIME[path.extname(f)] || 'application/octet-stream', 'Cache-Control': /\.(png|svg)$/.test(f) ? 'public, max-age=86400' : 'no-cache' }, SEC));
-    res.end(buf);
-  });
-}
-
-http.createServer(async (req, res) => {
-  let p; try { p = decodeURIComponent(new URL(req.url, 'http://x').pathname); } catch (e) { res.writeHead(400); return res.end(); }
-  if (p.startsWith('/api/')) {
-    try { await api(req, res, p); }
-    catch (e) { if (e instanceof HttpError) send(res, e.code, { error: e.message, fields: e.fields }); else { console.error(e); send(res, 500, { error: 'שגיאת שרת' }); } }
-  } else serve(req, res, p);
-}).listen(PORT, () => console.log('flowers רץ על פורט ' + PORT));
+    Object.assign(c, v.o); save(); return send(res, 200, { customer: pubCust(c), order: pubOrder
